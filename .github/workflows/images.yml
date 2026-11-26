@@ -6,7 +6,13 @@ name: Images
 # copy of this file says.
 on:
   push:
+  # checkov:skip=CKV_GHA_7: the input only names which published work image the VM disk is built from; only those who may push can start a run
   workflow_dispatch:
+    inputs:
+      work_tag:
+        description: Build the VM disk from this published work image tag (e.g. 0.1.0-dev.2.gf39c26f)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -30,6 +36,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # 0.1.0: above the 0.0.0-dev.<run> tags built before the move to this repository.
@@ -51,6 +60,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       # Branches build without pushing.
       - name: Build, push on main
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -60,3 +70,63 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+  vm:
+    name: VM disk
+    needs: work
+    # From a published work image only: the one main just pushed (by digest), or the tag a manual
+    # run names. Its runner is privileged (mkosi partitions and mounts), in a Kata VM on the desktop
+    # pool, below every session (the lab's gitops/apps/ci/runners.yaml).
+    if: github.ref == 'refs/heads/main' || inputs.work_tag != ''
+    runs-on: desktop-images-vm
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    env:
+      CRANE_VERSION: v0.22.1
+      CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+      MKOSI_COMMIT: 54c625c380ef5500f17460981a3c67b109b6a847 # v25.3
+      VERSION: ${{ needs.work.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Tools
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            debian-archive-keyring e2fsprogs qemu-utils python3-venv >/dev/null
+          python3 -m venv /opt/mkosi
+          /opt/mkosi/bin/pip install -q "git+https://github.com/systemd/mkosi@$MKOSI_COMMIT"
+          curl -fsSLo /tmp/crane.tgz \
+            "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "$CRANE_SHA256  /tmp/crane.tgz" | sha256sum -c -
+          tar -xzf /tmp/crane.tgz -C /usr/local/bin crane
+      # The runner's raw block volume, ext4: mkosi needs extended attributes, which Kata's shared
+      # filesystem lacks.
+      - name: Workspace
+        run: |
+          mkfs.ext4 -q /dev/work
+          mkdir -p /work && mount /dev/work /work
+          mkdir -p /work/rootfs /work/ws /work/out /work/layer/disk
+      - name: The work image's files
+        env:
+          IMAGE: ${{ inputs.work_tag != '' && format('ghcr.io/blizter/desktop-work:{0}', inputs.work_tag) || format('ghcr.io/blizter/desktop-work@{0}', needs.work.outputs.digest) }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$TOKEN" | crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          crane export "$IMAGE" - | tar -x --numeric-owner -p -C /work/rootfs
+      - name: Build
+        run: |
+          /opt/mkosi/bin/mkosi -C vm --base-tree=/work/rootfs --workspace-directory=/work/ws \
+            --output-directory=/work/out --force build
+      - name: qcow2
+        run: |
+          qemu-img convert -c -O qcow2 /work/out/desktop-work.raw /work/layer/disk/disk.qcow2
+          qemu-img check /work/layer/disk/disk.qcow2
+          qemu-img info /work/layer/disk/disk.qcow2
+      # KubeVirt's containerDisk layout (/disk/disk.qcow2, owned by qemu's uid 107): Incus and
+      # Proxmox take the qcow2 out of it.
+      - name: Push
+        run: |
+          tar -C /work/layer --owner=107 --group=107 -cf /work/layer.tar disk
+          crane append -f /work/layer.tar -t "ghcr.io/blizter/desktop-work-vm:$VERSION"
