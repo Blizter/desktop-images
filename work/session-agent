@@ -1,0 +1,76 @@
+#!/usr/bin/python3
+"""windbreak's session agent (its docs/desktop-contract.md): tells the operator whether a client
+is connected to this desktop, and since when it gave no input. GET /state on port 8444, plain
+HTTP: it holds no secret, and the network policy lets only the operator in.
+
+Kyber runs kynputserver (the client's keyboard and pointer) exactly while a client is connected.
+Its input reaches the X server through XTEST (our kynput patch); idle is X's own idle time, so
+that input must reset it: checked on the lab before any profile sets idleTimeout.
+"""
+import json
+import os
+import subprocess
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+TICKS = os.sysconf("SC_CLK_TCK")
+
+
+def client_age():
+    """Seconds since kynputserver started, or None if no client is connected."""
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                stat = f.read()
+        except OSError:  # the process ended meanwhile
+            continue
+        # The name is in parentheses and may hold spaces: split after it.
+        name = stat[stat.index("(") + 1 : stat.rindex(")")]
+        if name == "kynputserver":
+            started = int(stat[stat.rindex(")") + 2 :].split()[19]) / TICKS  # field 22
+            with open("/proc/uptime") as f:
+                return float(f.read().split()[0]) - started
+    return None
+
+
+def x_idle():
+    """Seconds since the X server's last input, or None if it can't be read."""
+    try:
+        out = subprocess.run(["xprintidle"], capture_output=True, text=True, timeout=2, check=True)
+        return int(out.stdout) / 1000
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def state():
+    age = client_age()
+    if age is None:
+        return {"attached": False}
+    answer = {"attached": True}
+    idle = x_idle()
+    if idle is not None:
+        # X's idle time keeps running while nobody is connected: a client that just came back
+        # has been idle only since it connected.
+        answer["idle"] = round(max(0.0, min(idle, age)), 1)
+    return answer
+
+
+class State(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/state":
+            self.send_error(404)
+            return
+        body = json.dumps(state()).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # one line per question, every 30 s: noise
+        pass
+
+
+if __name__ == "__main__":
+    ThreadingHTTPServer(("", 8444), State).serve_forever()

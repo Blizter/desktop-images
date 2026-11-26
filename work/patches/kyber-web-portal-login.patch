@@ -1,0 +1,92 @@
+diff --git a/html/index.html b/html/index.html
+index 3f16458..e24a246 100644
+--- a/html/index.html
++++ b/html/index.html
+@@ -37,12 +37,10 @@
+                     <div class="input-row">
+                       <label for="auth-method">Method</label>
+                       <select id="auth-method">
+-                        <option value="basic" selected>Basic</option>
+-                        <option value="jwt">Json Web Token</option>
+-                        <option value="oidc">OIDC</option>
++                        <option value="oidc" selected>OIDC</option>
+                       </select>
+                     </div>
+-                    <div id="auth-basic-fields">
++                    <div id="auth-basic-fields" style="display: none;">
+                       <div class="input-row">
+                         <label for="auth-user">Username</label>
+                         <input id="auth-user" type="text" value="Default user"/>
+@@ -58,11 +56,11 @@
+                         <input id="auth-token" type="text" value=""/>
+                       </div>
+                     </div>
+-                    <div id="auth-oidc-fields" style="display: none;">
++                    <div id="auth-oidc-fields">
+                       <p class="auth-info">You will be prompted to log in with your identity provider.</p>
+                       <div class="input-row">
+                         <label for="oidc_popup">Login in popup</label>
+-                        <input id="oidc_popup" type="checkbox" checked title="Open OIDC login in a popup window instead of redirecting."/>
++                        <input id="oidc_popup" type="checkbox" title="Open OIDC login in a popup window instead of redirecting."/>
+                       </div>
+                     </div>
+                   </div>
+diff --git a/html/ui.js b/html/ui.js
+index 9b005f9..3555dd8 100644
+--- a/html/ui.js
++++ b/html/ui.js
+@@ -31,6 +31,10 @@ let stopHandoff = null;
+ // Read and strip the #kyber= fragment now, before the load handler, so the
+ // token leaves the address bar while the page is still loading.
+ const handoff = detectHandoff();
++// Where this desktop's portal opens it, remembered once a handoff from that
++// portal has connected. A later load without a handoff (a reload, a bookmark)
++// goes there: the portal signs the user in and hands off again.
++const PORTAL_OPEN_KEY = "portal_open_url";
+ async function ensureOidc() {
+     if (!oidc) {
+         const { OidcManager } = await import("./oidc/manager.js");
+@@ -148,7 +152,7 @@ const overlayConfiguration = {
+ }
+ // Default popup-vs-redirect choice for OIDC, before any UI control exists.
+ // configureOverlayFromURLParams updates it from the oidc_popup URL param.
+-let oidcPopupDefault = true;
++let oidcPopupDefault = false;
+ // Capture mode: in capture mode, do not toggle the sidebar and set the toggle
+ // shortcut
+ let captureMode = false;
+@@ -672,6 +676,14 @@ window.addEventListener("load", async () => {
+     // error (shown in the sidebar status) stays readable.
+     const handoffUiListener = async (name, event) => {
+       if (name === "streaming_started") hideSidebar();
++      // Only a handoff that connected: its token was this desktop's user's, so
++      // a crafted link cannot plant another address here.
++      if (name === "controlplane_connected" && handoff.kyhubUrl && handoff.machineId) {
++        try {
++          localStorage.setItem(PORTAL_OPEN_KEY,
++              `${handoff.kyhubUrl}/open/${encodeURIComponent(handoff.machineId)}`);
++        } catch { /* no storage: the next load shows the notice below */ }
++      }
+       await uiClientListener(name, event);
+     };
+     stopHandoff = await startHandoff(handoff, handoffUiListener, updateStatus);
+@@ -681,6 +693,12 @@ window.addEventListener("load", async () => {
+     probeAudioAndMaybeShowOverlay();
+     return;
+   }
++  let portalOpen = null;
++  try { portalOpen = localStorage.getItem(PORTAL_OPEN_KEY); } catch { /* no storage */ }
++  if (portalOpen) {
++    location.replace(portalOpen);
++    return;
++  }
+   if (await handleOidcPageLoad()) return;
+
+   const [defaultHost, defaultPort] = script.getHostAndPortFromURLParams();
+@@ -732,4 +750,6 @@ window.addEventListener("load", async () => {
+       localStorage.setItem("metricsEnabled", String(metricsCheckbox.checked));
+     });
+   }
++  // Reached without a handoff, in a browser that never had one for this desktop.
++  updateStatus("Open this desktop from its portal");
+ });

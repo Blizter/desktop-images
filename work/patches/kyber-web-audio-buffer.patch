@@ -1,0 +1,15 @@
+diff --git a/html/script.js b/html/script.js
+index cf298b7..50a202d 100644
+--- a/html/script.js
++++ b/html/script.js
+@@ -476,7 +476,9 @@ export async function doConnect(optionalClientListener = null, host = null, port
+         port = defaultPort;
+     }
+     if (streamingConfig === null) {
+-        await updateStreamingConfig(getConfigFromURLParams());
++        // 200 ms of audio, not 50: sound crackled while the screen was busy, the web player's
++        // buffer running dry. A page opened by a portal has no sidebar to set it. URL params win.
++        await updateStreamingConfig({ audio_buffer: 200, ...getConfigFromURLParams() });
+     }
+
+     let credentials;

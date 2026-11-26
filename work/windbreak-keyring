@@ -1,0 +1,65 @@
+#!/usr/bin/python3
+"""Open the user's KDE Wallet with the key windbreak gives each user, so no app asks for a
+wallet password. Run inside the session's D-Bus, before Plasma.
+
+kwalletd6 takes a key the way pam_kwallet hands it one: PAM_KWALLET5_LOGIN set and
+--pam-login <pipe> <socket>; it reads the key from the pipe, takes one connection on the
+(listening) socket for environment lines, then creates the wallet with that key if there is
+none, and opens it. Without the key file, it does nothing: KWallet asks, as it always has.
+"""
+
+import hashlib
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+KEY_FILE = "/run/windbreak/keyring/key"
+KEY_SIZE = 56  # PBKDF2_SHA512_KEYSIZE, what kwalletd reads from the pipe
+
+
+def main() -> None:
+    try:
+        with open(KEY_FILE, "rb") as f:
+            secret = f.read()
+    except FileNotFoundError:
+        return
+    if not secret:
+        sys.exit(f"windbreak-keyring: {KEY_FILE} is empty")
+    # kwalletd's own size, whatever the platform's key length.
+    key = hashlib.shake_256(secret).digest(KEY_SIZE)
+
+    path = os.path.join(tempfile.mkdtemp(prefix="keyring-"), "env")
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(path)
+        listener.listen(1)
+        r, w = os.pipe()
+        os.write(w, key)
+        os.close(w)
+        subprocess.Popen(  # pylint: disable=consider-using-with  # the session's daemon, left running
+            ["kwalletd6", "--pam-login", str(r), str(listener.fileno())],
+            env=dict(os.environ, PAM_KWALLET5_LOGIN=path),
+            pass_fds=(r, listener.fileno()),
+        )
+        os.close(r)
+        # Its environment is ours already: connect and send nothing.
+        with socket.socket(socket.AF_UNIX) as conn:
+            conn.connect(path)
+    os.unlink(path)
+    os.rmdir(os.path.dirname(path))
+
+    # Plasma starts once kwalletd holds its name: a request before that would D-Bus-activate a
+    # second kwalletd, without the key, which asks for a password.
+    ask = ["dbus-send", "--session", "--print-reply=literal", "--dest=org.freedesktop.DBus",
+           "/org/freedesktop/DBus", "org.freedesktop.DBus.NameHasOwner", "string:org.kde.kwalletd6"]
+    for _ in range(100):
+        if subprocess.run(ask, capture_output=True, text=True, check=False).stdout.split()[-1:] == ["true"]:
+            return
+        time.sleep(0.1)
+    sys.exit("windbreak-keyring: kwalletd6 did not start")
+
+
+if __name__ == "__main__":
+    main()

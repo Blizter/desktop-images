@@ -1,0 +1,80 @@
+diff --git a/kycontroller/src/main.rs b/kycontroller/src/main.rs
+index 9a65dad..a7618b3 100644
+--- a/kycontroller/src/main.rs
++++ b/kycontroller/src/main.rs
+@@ -23,7 +23,8 @@
+ use std::net::SocketAddr;
+ use std::path::PathBuf;
+ use std::process::ExitCode;
+-use std::sync::Arc;
++use std::sync::{Arc, Mutex};
++use std::time::{Duration, Instant};
+
+ use actix_session::SessionMiddleware;
+ use actix_session::storage::CookieSessionStore;
+@@ -125,7 +126,8 @@ struct LoginQuery {
+ ///
+ /// When `multi_client = true` (default), multiple sessions are accepted.
+ /// When `multi_client = false`, a second concurrent login attempt is rejected
+-/// with `409 Conflict` until the existing session logs out.
++/// with `409 Conflict` until the existing session logs out, unless it comes from the
++/// user who holds that session: then it replaces it.
+ #[post("/login")]
+ async fn login(
+     ctrl: web::Data<Controller>,
+@@ -176,14 +178,47 @@ async fn login(
+         }
+     };
+
+-    if ctrl.config.session_mode() == config::SessionMode::Mono
+-        && !ctrl.sessions.lock().unwrap().is_empty()
+-    {
+-        warn!(
+-            "Refusing login for \"{}\": mono-client mode and a session is already active",
+-            auth_session.username
+-        );
+-        return HttpResponse::Conflict().json("Another client is already connected");
++    if ctrl.config.session_mode() == config::SessionMode::Mono {
++        // The seat's own user takes it over: a client that lost its network logs in again
++        // within a second, while its dead session stays for up to a minute of missed pings
++        // (KEEPINTVL * KEEPCNT), or until its token expires if no websocket ever came. The
++        // client that lost the seat reconnects by itself for ten seconds; it is refused for
++        // TAKEOVER_HOLD, so that two clients of one user do not take the seat in turns.
++        static LAST_TAKEOVER: Mutex<Option<Instant>> = Mutex::new(None);
++        const TAKEOVER_HOLD: Duration = Duration::from_secs(15);
++
++        let (taken, own) = {
++            let sessions = ctrl.sessions.lock().unwrap();
++            (
++                !sessions.is_empty(),
++                sessions
++                    .values()
++                    .all(|s| s.username == auth_session.username),
++            )
++        };
++        if taken {
++            let held = {
++                let mut last = LAST_TAKEOVER.lock().unwrap();
++                let held = last.is_some_and(|at| at.elapsed() < TAKEOVER_HOLD);
++                if own && !held {
++                    *last = Some(Instant::now());
++                }
++                held
++            };
++            if !own || held {
++                warn!(
++                    "Refusing login for \"{}\": mono-client mode and a session is already active",
++                    auth_session.username
++                );
++                return HttpResponse::Conflict().json("Another client is already connected");
++            }
++            warn!(
++                "\"{}\" takes over their own session",
++                auth_session.username
++            );
++            ctrl.remove_sessions_if(|_| true, controller::SessionEndReason::ConnectionLost)
++                .await;
++        }
+     }
+
+     info!("Logging in \"{}\"...", auth_session.username);

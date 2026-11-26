@@ -1,0 +1,6 @@
+# Element's own repository: element-desktop, the Matrix client (not packaged by Debian).
+Types: deb
+URIs: https://packages.element.io/debian/
+Suites: default
+Components: main
+Signed-By: /usr/share/keyrings/element-io-archive-keyring.gpg

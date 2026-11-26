@@ -1,0 +1,19 @@
+#!/bin/sh
+# Warns the user before windbreak ends the session, 10 minutes and 1 minute ahead, with Plasma
+# notifications that stay until dismissed. The end is WINDBREAK_SESSION_END (RFC 3339, set by the
+# operator: windbreak's docs/desktop-contract.md); without it, nothing to do. Runs inside the
+# desktop's D-Bus session, where the notifications are.
+[ -n "${WINDBREAK_SESSION_END:-}" ] || exit 0
+end=$(date -d "$WINDBREAK_SESSION_END" +%s) || exit 1
+for minutes in 10 1; do
+	wait=$((end - minutes * 60 - $(date +%s)))
+	[ "$wait" -ge 0 ] || continue
+	sleep "$wait"
+	unit=minutes
+	[ "$minutes" -eq 1 ] && unit=minute
+	busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications \
+		org.freedesktop.Notifications Notify 'susssasa{sv}i' Desktop 0 dialog-warning \
+		"This desktop closes in $minutes $unit" \
+		"Save your work now. What you saved in your home folder is kept: afterwards, start a new desktop from the portal." \
+		0 1 urgency y 2 0 >/dev/null
+done

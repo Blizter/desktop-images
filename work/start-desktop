@@ -1,0 +1,169 @@
+#!/bin/bash
+# The session's desktop and its Kyber server, as windbreak's desktop contract has it: uid 1000,
+# a read-only root, scratch files in /tmp, the user's own in HOME. It stays in the foreground;
+# when any part exits, so does the container, and the session ends.
+#
+# Environment, set by windbreak's Kyber backend:
+#   KYBER_OIDC_ISSUER               the Keycloak realm, https://id.<domain>/realms/<realm>
+#   KYBER_OIDC_CLIENT_ID            the public client the Kyber clients sign in with
+#   KYBER_OIDC_AUDIENCE             the `aud` a token must carry; default: the client ID
+#   KYBER_OIDC_ALLOWED_IDENTIFIERS  the `sub`s let in, comma-separated: the session's user
+#   KYBER_PORT                      page and control (TCP) and stream (UDP); default 8443
+#   KYBER_DATAPLANE_PORT            the stream's own UDP port, also what the client is told to
+#                                   dial on the page's hostname; default: KYBER_PORT
+#   KYBER_TLS_CERT, KYBER_TLS_KEY   the page's certificate and key (PEM files), so what stands in
+#                                   front can verify it; default: one generated here
+#   KYBER_TLS_SAN                   the generated certificate's subjectAltName; default IP:127.0.0.1
+#   SCREEN_GEOMETRY, KEYBOARD_LAYOUT  default 1920x1080, us
+set -euo pipefail
+
+need() {
+	if [ -z "${!1:-}" ]; then
+		echo "start-desktop: $1 is required${2:+: $2}" >&2
+		exit 1
+	fi
+}
+need KYBER_OIDC_ISSUER
+need KYBER_OIDC_CLIENT_ID
+need KYBER_OIDC_ALLOWED_IDENTIFIERS "an empty list lets any user of the realm in"
+
+port=${KYBER_PORT:-8443}
+geometry=${SCREEN_GEOMETRY:-1920x1080}
+scratch=/tmp/desktop
+export XDG_RUNTIME_DIR=$scratch/run
+mkdir -p "$scratch/run" /tmp/kyber /tmp/xkb
+chmod 700 "$scratch" "$scratch/run" /tmp/kyber
+
+# TOML strings and string lists from environment values.
+quote() {
+	local v=${1//\\/\\\\}
+	printf '"%s"' "${v//\"/\\\"}"
+}
+quote_list() {
+	local out="" id ids
+	IFS=, read -ra ids <<<"$1"
+	for id in "${ids[@]}"; do
+		id=${id//[[:space:]]/}
+		[ -n "$id" ] && out+="${out:+, }$(quote "$id")"
+	done
+	printf '[%s]' "$out"
+}
+
+# The page's TLS key: the one given, or one made for this session and gone with /tmp. (The
+# stream's certificate is Kyber's own, generated at start and pinned by the client.)
+tls_cert=${KYBER_TLS_CERT:-}
+tls_key=${KYBER_TLS_KEY:-}
+if [ -z "${KYBER_TLS_CERT:-}" ] || [ -z "${KYBER_TLS_KEY:-}" ]; then
+	tls_cert=/tmp/kyber/tls.crt tls_key=/tmp/kyber/tls.key
+	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 \
+		-subj /CN=desktop -addext "subjectAltName=${KYBER_TLS_SAN:-IP:127.0.0.1}" \
+		-keyout "$tls_key" -out "$tls_cert" 2>/dev/null
+fi
+case ${KYBER_DATAPLANE_PORT:-} in
+'') dataplane="" ;;
+*[!0-9]*) echo "start-desktop: KYBER_DATAPLANE_PORT must be a port number" >&2; exit 1 ;;
+*) dataplane="dataplane_port = $KYBER_DATAPLANE_PORT" ;;
+esac
+
+# Each setting that matters for the enclave is written out, as Kyber's defaults are open:
+# basic logins and JWTs signed with a published development key are on, a second viewer may
+# join, and the clipboard works both ways.
+cat >"$KYBER_CONFIG" <<EOF
+[kyavserver]
+encoder = "x264"
+grab_backend = "xcb"
+
+[kycontroller]
+port = $port
+$dataplane
+listen_mode = "ipv4"
+tls_cert = $(quote "$tls_cert")
+tls_key = $(quote "$tls_key")
+webclient = "/opt/kyber/webclient"
+multi_client = false
+tray = false
+
+[kycontroller.security]
+trusted_origins = []
+same_site = true
+
+[kycontroller.auth.basic]
+enabled = false
+
+[kycontroller.auth.jwt]
+enabled = false
+
+[kycontroller.auth.oidc]
+enabled = true
+issuer = $(quote "$KYBER_OIDC_ISSUER")
+client_id = $(quote "$KYBER_OIDC_CLIENT_ID")
+audience = $(quote "${KYBER_OIDC_AUDIENCE:-$KYBER_OIDC_CLIENT_ID}")
+identity_claim = "sub"
+allowed_identifiers = $(quote_list "$KYBER_OIDC_ALLOWED_IDENTIFIERS")
+
+[kynputserver]
+clipboard_allow_copy = false
+clipboard_allow_paste = false
+EOF
+
+# One virtual screen on Xorg's dummy driver, its mode computed for the geometry at 60 Hz.
+modeline=$(gtf "${geometry%x*}" "${geometry#*x}" 60 | sed -n 's/^ *Modeline *//p')
+cat >"$scratch/xorg.conf" <<EOF
+Section "ServerFlags"
+	Option "DontVTSwitch" "true"
+	Option "AllowMouseOpenFail" "true"
+EndSection
+Section "Device"
+	Identifier "screen"
+	Driver "dummy"
+	VideoRam 256000
+EndSection
+Section "Monitor"
+	Identifier "monitor"
+	HorizSync 5.0-1000.0
+	VertRefresh 5.0-200.0
+	Modeline $modeline
+EndSection
+Section "Screen"
+	Identifier "screen"
+	Device "screen"
+	Monitor "monitor"
+	DefaultDepth 24
+	SubSection "Display"
+		Depth 24
+		Modes ${modeline%% *}
+	EndSubSection
+EndSection
+EOF
+
+/usr/lib/xorg/Xorg "$DISPLAY" -config "$scratch/xorg.conf" -logfile "$scratch/xorg.log" \
+	-nolisten tcp -noreset -novtswitch -sharevts &
+for _ in $(seq 100); do xset q >/dev/null 2>&1 && break; sleep 0.1; done
+xset q >/dev/null || { cat "$scratch/xorg.log" >&2; exit 1; }
+xset s off -dpms
+setxkbmap -layout "${KEYBOARD_LAYOUT:-us}"
+
+# Sound goes to a null sink; Kyber captures its monitor. At 48 kHz, Opus's own rate: from
+# PulseAudio's default 44.1 kHz, Kyber's resampler ends up handing the encoder a short frame,
+# and the sound stops for the rest of the connection.
+pulseaudio --daemonize=no --exit-idle-time=-1 --realtime=no --high-priority=no -n \
+	--load=module-native-protocol-unix \
+	--load="module-null-sink sink_name=desktop rate=48000 sink_properties=device.description=Desktop" &
+for _ in $(seq 100); do pactl info >/dev/null 2>&1 && break; sleep 0.1; done
+
+# KDE Plasma, without systemd (/etc/xdg/startkderc) and without compositing: on a virtual
+# screen with no GPU it only costs CPU. Logging out of it ends the session. Its wallet opens
+# first, with the user's key (windbreak-keyring), so no app asks for a wallet password. The
+# warnings before the session's end (windbreak-session-end) need its D-Bus session too; detached,
+# so Plasma never waits for them.
+KWIN_COMPOSE=N dbus-run-session -- sh -c 'windbreak-keyring; (windbreak-session-end &); exec startplasma-x11' &
+# Firefox's files (295 MB) into memory while Plasma starts, at idle priority: its first launch then
+# takes 3.0 s instead of 5.3 s, reading them through the VM's shared filesystem (measured 2026-11-25).
+(nice -n 19 ionice -c 3 find /usr/lib/firefox-esr -type f -exec cat {} + >/dev/null 2>&1 &)
+kycontroller &
+# Not one of the parts below: without it the operator just stops seeing who is connected.
+(session-agent &)
+
+wait -n
+echo "start-desktop: a part of the desktop exited, ending the session" >&2
+exit 1

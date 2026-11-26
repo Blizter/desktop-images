@@ -1,0 +1,3 @@
+# No file indexing: it costs CPU and writes its index into the home volume.
+[Basic Settings]
+Indexing-Enabled=false

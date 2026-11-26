@@ -1,0 +1,41 @@
+# Checks on every commit (prek or pre-commit) and in CI (.github/workflows/images.yml).
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.patch$ # a patch's blank context lines are a lone space
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+
+  # Secret scanning: this repository is public.
+  - repo: https://github.com/betterleaks/betterleaks
+    rev: v1.10.1
+    hooks:
+      - id: betterleaks
+
+  - repo: https://github.com/AleksaC/hadolint-py
+    rev: v2.15.1
+    hooks:
+      - id: hadolint
+        # apt packages are not version-pinned: the images follow Debian trixie's security updates.
+        args: [--ignore, DL3008]
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+
+  - repo: https://github.com/bridgecrewio/checkov
+    rev: '3.4.7'
+    hooks:
+      - id: checkov
+        args: [--quiet, --framework, dockerfile, github_actions]
+        # The hook triggers on .tf files by default.
+        files: (^|/)Dockerfile$|\.ya?ml$
