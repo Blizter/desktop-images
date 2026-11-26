@@ -1,0 +1,62 @@
+name: Images
+
+# Pushes (any branch, by whoever may push here) and manual runs. Builds run on our own runners
+# (scale set desktop-images) and BuildKit: a fork's pull request must never reach them, which the
+# repository setting "Require approval for all external contributors" holds, whatever a fork's
+# copy of this file says.
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: j178/prek-action@7b101f8338a08d2bd6fdb3625e4e7692428763a3 # v3.1.1
+        env:
+          SKIP: betterleaks # scans staged changes only: nothing to scan in CI
+
+  work:
+    name: work image
+    needs: check
+    runs-on: desktop-images
+    # Kyber, FFmpeg and the web client build from source: long without BuildKit's cache.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # 0.1.0: above the 0.0.0-dev.<run> tags built before the move to this repository.
+      - name: Version
+        id: version
+        run: echo "version=0.1.0-dev.$GITHUB_RUN_NUMBER.g${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      # The runner builds nothing itself: the build goes to the lab's BuildKit, whose cache keeps
+      # the Kyber and toolchain stages between runs.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver: remote
+          endpoint: tcp://buildkitd.buildkit.svc.cluster.local:1234
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Branches build without pushing.
+      - name: Build, push on main
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: work/Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ghcr.io/blizter/desktop-work:${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}

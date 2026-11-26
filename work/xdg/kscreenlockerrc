@@ -1,0 +1,5 @@
+# The screen never locks: a desktop user has no password and there is no seat, so a locked
+# screen could only be left by ending the session. [$i]: a user setting cannot turn it back on.
+[Daemon][$i]
+Autolock=false
+LockOnResume=false

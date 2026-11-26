@@ -1,0 +1,3 @@
+# Nor by its shortcut (Meta+L) or menu entry: the action itself is refused.
+[KDE Action Restrictions][$i]
+action/lock_screen=false

@@ -1,24 +1,44 @@
 # desktop-images
 
-The desktop images of a cloud enclave: remote Linux desktops streamed to a browser, one sandboxed
-VM per session. This repository is the public half of the project. It holds what the desktops are
-built from, and how we meet the licence of the streaming software they run.
+The desktop images of a cloud enclave: remote Linux desktops streamed to a browser by
+[Kyber](https://gitlab.com/kyber), one sandboxed VM per session, run by our session operator
+(windbreak). This repository holds what the desktops are built from, and the source the licence
+of the streaming software asks us to offer.
 
-## What will be here
+| Image | Folder | Contents |
+|-------|--------|----------|
+| `ghcr.io/blizter/desktop-work` | `work/` | KDE Plasma on a virtual screen, Firefox ESR, LibreOffice (Writer, Calc, Impress), VLC, the Nextcloud client, Element (Matrix), Dolphin, Konsole, KWrite; the Kyber 0.29.0 server and web client |
 
-| Part | What |
-|------|------|
-| Images | The Dockerfiles of the desktop images: KDE Plasma on a virtual screen, the apps, and the [Kyber](https://gitlab.com/kyber) server that streams the desktop. Each session runs one as a container in its own VM (Kata Containers) |
-| VM images | How we build the disk images (ISOs) for sessions that run as full VMs, for hardware a container's VM can't pass through (a GPU, a camera) |
-| Kyber's source | Our patches to Kyber and how to build the exact Kyber a desktop runs, from upstream's release tag |
+Built by `.github/workflows/images.yml` on our own runners, tagged `0.1.0-dev.<run>.g<short sha>`;
+pushes to `main` publish. The images themselves are private: they are configured for our lab
+(`work/element/config.json` names its Matrix server).
 
-The images move here from our private repository in later pushes.
+Coming: disk images (qcow2, built with [mkosi](https://github.com/systemd/mkosi)) for sessions that
+run as full VMs, for hardware a container's VM can't pass through (a GPU, a camera).
+
+## What an image may rely on
+
+The desktop contract of the session operator: uid 1000, a read-only root, `HOME` (`/home/user`,
+the user's volume) and `/tmp` (per session) the only writable paths, the desktop in the
+foreground. The Kyber settings come from environment variables the operator sets;
+`work/start-desktop` lists them. Login is OIDC only: basic logins, Kyber's JWT backend (on by
+default, with a public development key), a second viewer and the clipboard are all off, set
+explicitly.
 
 ## Licence
 
 AGPL-3.0, the whole repository ([LICENSE](LICENSE)), the same as Kyber.
 
-Kyber is AGPL-3.0. Whoever uses one of these desktops over the network may get the source of the
-Kyber it runs (AGPL section 13), and so may anyone given an image. That source is Kyber's upstream
-release tag plus the patches in this repository, built as the Dockerfiles here build it. Before
-anyone outside the project uses a desktop, its web client links here.
+The Dockerfile and scripts are written from Kyber's public build instructions (kyber-desktop's and
+kyber-web's READMEs) and the session operator's contract; they copy no third party's files. Kyber
+is built from its release tag with the patches in `work/patches/` ([what each does and
+why](work/patches/README.md)). Whoever uses one of these desktops over the network, or receives an
+image, is owed the source of the Kyber it runs (AGPL section 13): upstream's release tag plus those
+patches, built as `work/Dockerfile` builds it. This repository is that offer.
+
+### Keyboard and mouse: through XTEST
+
+Kyber as released sends keys and buttons through `/dev/uinput`, and only the absolute mouse
+position through XTEST. A Kata VM's kernel has no uinput and loads no modules, so
+`work/patches/kynput-xtest-input.patch` sends them through XTEST too when uinput is missing.
+Gamepads still need uinput: none here.

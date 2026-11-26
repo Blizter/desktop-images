@@ -1,0 +1,9 @@
+# The wallet windbreak-keyring opens at start stays open, and no app is asked about it: a
+# closed wallet would reopen only with a password, which the user never set.
+[Wallet]
+Enabled=true
+First Use=false
+Use One Wallet=true
+Close When Idle=false
+Close on Screensaver=false
+Prompt on Open=false
