@@ -86,47 +86,62 @@ jobs:
     env:
       CRANE_VERSION: v0.22.1
       CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+      ORAS_VERSION: 1.3.6
+      ORAS_SHA256: 66fb0ad7206f3f6fa77ed5b552049d364ccf4b50b1684554f731f76302b52ca0
       MKOSI_COMMIT: 54c625c380ef5500f17460981a3c67b109b6a847 # v25.3
       VERSION: ${{ needs.work.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Tools
-        run: |
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            debian-archive-keyring e2fsprogs qemu-utils python3-venv >/dev/null
-          python3 -m venv /opt/mkosi
-          /opt/mkosi/bin/pip install -q "git+https://github.com/systemd/mkosi@$MKOSI_COMMIT"
-          curl -fsSLo /tmp/crane.tgz \
-            "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/go-containerregistry_Linux_x86_64.tar.gz"
-          echo "$CRANE_SHA256  /tmp/crane.tgz" | sha256sum -c -
-          tar -xzf /tmp/crane.tgz -C /usr/local/bin crane
-      # The runner's raw block volume, ext4: mkosi needs extended attributes, which Kata's shared
-      # filesystem lacks.
-      - name: Workspace
-        run: |
-          mkfs.ext4 -q /dev/work
-          mkdir -p /work && mount /dev/work /work
-          mkdir -p /work/rootfs /work/ws /work/out /work/layer/disk
-      - name: The work image's files
+      # The work image downloads while the tools install: neither needs the other.
+      - name: Tools, workspace and the work image's files
         env:
           IMAGE: ${{ inputs.work_tag != '' && format('ghcr.io/blizter/desktop-work:{0}', inputs.work_tag) || format('ghcr.io/blizter/desktop-work@{0}', needs.work.outputs.digest) }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends e2fsprogs >/dev/null
+          # The runner's raw block volume, ext4: mkosi needs extended attributes, which Kata's
+          # shared filesystem lacks.
+          mkfs.ext4 -q /dev/work
+          mkdir -p /work && mount /dev/work /work
+          mkdir -p /work/rootfs /work/ws /work/out /work/skeleton/efi
+          curl -fsSLo /tmp/crane.tgz \
+            "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "$CRANE_SHA256  /tmp/crane.tgz" | sha256sum -c -
+          tar -xzf /tmp/crane.tgz -C /usr/local/bin crane
           echo "$TOKEN" | crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          crane export "$IMAGE" - | tar -x --numeric-owner -p -C /work/rootfs
+          (crane export "$IMAGE" - | tar -x --numeric-owner -p -C /work/rootfs) &
+          export_pid=$!
+          # mkosi's tools, from the runner's Ubuntu instead of a tools tree it would build each run.
+          apt-get install -y -qq --no-install-recommends \
+            debian-archive-keyring systemd-repart systemd-ukify systemd-boot systemd-boot-efi \
+            dosfstools mtools cpio zstd kmod qemu-utils python3-venv >/dev/null
+          python3 -m venv /opt/mkosi
+          /opt/mkosi/bin/pip install -q "git+https://github.com/systemd/mkosi@$MKOSI_COMMIT"
+          curl -fsSLo /tmp/oras.tgz \
+            "https://github.com/oras-project/oras/releases/download/v$ORAS_VERSION/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          echo "$ORAS_SHA256  /tmp/oras.tgz" | sha256sum -c -
+          tar -xzf /tmp/oras.tgz -C /usr/local/bin oras
+          echo "$TOKEN" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          wait "$export_pid"
+      # The skeleton tree, laid down before the packages, adds /efi (the EFI partition's mount
+      # point, where bootctl installs), which the container image lacks.
       - name: Build
         run: |
-          /opt/mkosi/bin/mkosi -C vm --base-tree=/work/rootfs --workspace-directory=/work/ws \
-            --output-directory=/work/out --force build
+          /opt/mkosi/bin/mkosi -C vm --base-tree=/work/rootfs --skeleton-tree=/work/skeleton \
+            --workspace-directory=/work/ws --output-directory=/work/out --force build
+      # zstd on parallel writers: 11x faster than the default zlib, same size (measured 2026-11-26).
       - name: qcow2
+        working-directory: /work/out
         run: |
-          qemu-img convert -c -O qcow2 /work/out/desktop-work.raw /work/layer/disk/disk.qcow2
-          qemu-img check /work/layer/disk/disk.qcow2
-          qemu-img info /work/layer/disk/disk.qcow2
-      # KubeVirt's containerDisk layout (/disk/disk.qcow2, owned by qemu's uid 107): Incus and
-      # Proxmox take the qcow2 out of it.
+          qemu-img convert -c -O qcow2 -o compression_type=zstd -m 8 -W desktop-work.raw disk.qcow2
+          qemu-img check disk.qcow2
+          qemu-img info disk.qcow2
+      # The qcow2 as it is, one OCI artifact (oras pull): a container layer would gzip it again.
       - name: Push
+        working-directory: /work/out
         run: |
-          tar -C /work/layer --owner=107 --group=107 -cf /work/layer.tar disk
-          crane append -f /work/layer.tar -t "ghcr.io/blizter/desktop-work-vm:$VERSION"
+          oras push "ghcr.io/blizter/desktop-work-vm:$VERSION" \
+            --artifact-type application/vnd.blizter.desktop-vm-disk disk.qcow2:application/x-qemu-disk
