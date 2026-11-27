@@ -18,9 +18,9 @@ pushes to `main` publish. The images themselves are private: they are configured
 `ghcr.io/blizter/desktop-work-vm`: the same desktop as a bootable VM disk (qcow2), for sessions
 that will run as full VMs, for hardware a container's VM can't pass through (a GPU, a camera).
 [mkosi](https://github.com/systemd/mkosi) (`vm/mkosi.conf`) takes the published work image's
-files and adds a kernel, systemd and systemd-boot. Published in KubeVirt's containerDisk layout
-(`/disk/disk.qcow2`); Incus and Proxmox take the qcow2 out of it. It boots to a console:
-starting the desktop in a VM waits for the session operator's VM runtime.
+files and adds a kernel, systemd and systemd-boot. Published as an OCI artifact holding
+`disk.qcow2` (zstd-compressed clusters): `oras pull ghcr.io/blizter/desktop-work-vm:<tag>`. It
+boots to a console: starting the desktop in a VM waits for the session operator's VM runtime.
 
 Built by the `vm` job on pushes to `main`, from the image the `work` job just pushed, or by hand
 (Actions, Images, Run workflow) from a published tag given as `work_tag`.
