@@ -1,0 +1,23 @@
+#!/bin/sh
+# Mounts the user's home disk at /home/user: the one whole disk beside the system's that is
+# either blank (a new user's: formatted here, once) or already a home (ext4, labelled
+# windbreak-home). Any other disk is left alone: cloud-init's own, for one. Without a home disk
+# (a VM booted by hand) /home/user stays on the system disk, and is lost with the VM.
+set -eu
+label=windbreak-home
+system=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)")
+for name in $(lsblk -dn -o NAME,TYPE | awk '$2 == "disk" { print $1 }'); do
+	dev=/dev/$name
+	[ "$name" = "$system" ] && continue
+	[ "$(lsblk -n -o NAME "$dev" | wc -l)" -eq 1 ] || continue # partitioned: not a home
+	type=$(blkid -o value -s TYPE "$dev" || true)
+	if [ -z "$type" ]; then
+		mkfs.ext4 -q -L "$label" "$dev"
+	elif [ "$type" != ext4 ] || [ "$(blkid -o value -s LABEL "$dev")" != "$label" ]; then
+		continue
+	fi
+	mount -o nosuid,nodev "$dev" /home/user
+	chown 1000:1000 /home/user
+	exit 0
+done
+echo "windbreak-home: no home disk, /home/user is on the system disk" >&2

@@ -19,8 +19,15 @@ pushes to `main` publish. The images themselves are private: they are configured
 that will run as full VMs, for hardware a container's VM can't pass through (a GPU, a camera).
 [mkosi](https://github.com/systemd/mkosi) (`vm/mkosi.conf`) takes the published work image's
 files and adds a kernel, systemd and systemd-boot. Published as an OCI artifact holding
-`disk.qcow2` (zstd-compressed clusters): `oras pull ghcr.io/blizter/desktop-work-vm:<tag>`. It
-boots to a console: starting the desktop in a VM waits for the session operator's VM runtime.
+`disk.qcow2` (zstd-compressed clusters): `oras pull ghcr.io/blizter/desktop-work-vm:<tag>`.
+
+In a VM the desktop starts as it does in a pod, from the same contract (`vm/mkosi.extra/`):
+cloud-init writes the session's settings (`/etc/windbreak/session.env`) and the account and
+keyring files, as the session operator's VM runtime hands them over; `windbreak-home` mounts
+the user's home disk (the VM's second disk, formatted when new) at `/home/user`;
+`windbreak-desktop.service` runs `start-desktop` as uid 1000 on a read-only system. When the
+desktop exits, the VM powers off. Booted by hand, with no settings, it stays at its console.
+Not yet run on a hypervisor.
 
 Built by the `vm` job on pushes to `main`, from the image the `work` job just pushed, or by hand
 (Actions, Images, Run workflow) from a published tag given as `work_tag`.

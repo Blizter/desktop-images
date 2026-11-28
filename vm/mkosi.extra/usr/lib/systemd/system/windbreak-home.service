@@ -1,0 +1,13 @@
+# The user's home: the VM's second disk, attached by the VM runtime, mounted at /home/user.
+[Unit]
+Description=The user's home disk (windbreak)
+After=local-fs.target
+Before=windbreak-desktop.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/windbreak-home
+
+[Install]
+WantedBy=multi-user.target
