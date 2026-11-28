@@ -1,0 +1,33 @@
+# The session's desktop in a VM: what the container's entrypoint is in a pod. The session
+# operator's VM runtime hands the session's settings to cloud-init, which writes
+# /etc/windbreak/session.env (the variables a pod's desktop finds in its environment) and the
+# account and keyring files under /run/windbreak. The same contract holds: uid 1000, a read-only
+# system, HOME and /tmp the only writable paths. The desktop exiting ends the session: the VM
+# powers off, and the operator sees it stopped.
+[Unit]
+Description=The session's desktop (windbreak)
+After=cloud-init.target windbreak-home.service network-online.target
+Wants=network-online.target
+Requires=windbreak-home.service
+# Without a session (a VM booted by hand) the VM stays at its console.
+ConditionPathExists=/etc/windbreak/session.env
+SuccessAction=poweroff
+FailureAction=poweroff
+
+[Service]
+User=1000
+Group=1000
+EnvironmentFile=/etc/windbreak/session.env
+# The work image's ENV (work/Dockerfile), which a unit does not inherit.
+Environment=HOME=/home/user SHELL=/bin/bash DISPLAY=:0 LANG=en_US.UTF-8 KYBER_CONFIG=/tmp/kyber/kyber_config.toml
+Environment=PATH=/opt/kyber/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=LD_LIBRARY_PATH=/opt/kyber/lib:/opt/kyber/lib/x86_64-linux-gnu:/opt/kyber/lib64
+WorkingDirectory=/home/user
+ExecStart=/usr/local/bin/start-desktop
+ProtectSystem=strict
+ReadWritePaths=/home/user
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

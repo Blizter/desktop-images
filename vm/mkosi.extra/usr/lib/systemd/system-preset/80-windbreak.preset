@@ -1,0 +1,4 @@
+enable windbreak-home.service
+enable windbreak-desktop.service
+enable systemd-networkd.service
+enable systemd-resolved.service
